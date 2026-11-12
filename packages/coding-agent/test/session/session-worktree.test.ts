@@ -199,6 +199,41 @@ describe("session worktree helpers (real git)", () => {
 		expect(await inspectSessionWorktree(wt)).toEqual({ ...clean, dirty: true });
 	});
 
+	it("moves into a branch's existing worktree without carrying source changes", async () => {
+		const wt = await create();
+		await Bun.write(path.join(wt.path, "tracked.txt"), "worktree edit\n");
+		await Bun.write(path.join(repo, "tracked.txt"), "source edit\n");
+		const reused = await create();
+		expect(reused).toMatchObject({ path: wt.path, branch, reused: true, createdBranch: false, keptChanges: false });
+		expect(await Bun.file(path.join(wt.path, "tracked.txt")).text()).toBe("worktree edit\n");
+		expect(await Bun.file(path.join(repo, "tracked.txt")).text()).toBe("source edit\n");
+		await expect(createSessionWorktree(wt.path, Settings.isolated(), branch)).rejects.toThrow("already on branch");
+	});
+
+	it("checks out an existing branch at its own tip and keeps the branch on removal", async () => {
+		git(repo, "branch", "existing");
+		const tip = git(repo, "rev-parse", "HEAD");
+		await commitFile(repo, "main-only.txt");
+		await Bun.write(path.join(repo, "tracked.txt"), "source edit\n");
+		const wt = await create(true, "existing");
+		expect(wt).toMatchObject({ baseCommit: tip, reused: false, createdBranch: false, keptChanges: false });
+		expect(git(wt.path, "rev-parse", "HEAD")).toBe(tip);
+		expect(await exists(path.join(wt.path, "main-only.txt"))).toBe(false);
+		expect(git(wt.path, "status", "--porcelain")).toBe("");
+		expect(await Bun.file(path.join(repo, "tracked.txt")).text()).toBe("source edit\n");
+		await removeSessionWorktree(wt, false);
+		expect(await exists(wt.path)).toBe(false);
+		expect(branchSha(repo, "existing")).toBe(tip);
+	});
+
+	it("carries source changes onto an existing branch at the source HEAD", async () => {
+		git(repo, "branch", "same-head");
+		await Bun.write(path.join(repo, "tracked.txt"), "source edit\n");
+		const wt = await create(true, "same-head");
+		expect(wt).toMatchObject({ createdBranch: false, keptChanges: true });
+		expect(await Bun.file(path.join(wt.path, "tracked.txt")).text()).toBe("source edit\n");
+	});
+
 	it("plans newest first and removes from inside the newest worktree", async () => {
 		const older = await create(true, "wt/older");
 		const newer = await create(true, "wt/newer");

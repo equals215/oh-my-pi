@@ -1745,9 +1745,10 @@ export class CommandController {
 	}
 
 	/**
-	 * `/wt [<branch>]` — fork the checkout into a new linked git worktree on
-	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along
-	 * unless `keepChanges` is false, then relocate the session there like `/move`.
+	 * `/wt [<branch>]` — move the session into `branch`'s linked git worktree
+	 * (default `wt/<timestamp>`) like `/move`: an existing one is reused as-is,
+	 * otherwise one is created, carrying uncommitted changes along when it starts
+	 * at the source `HEAD` and `keepChanges` is not false.
 	 * Returns the worktree only when the session now lives in it.
 	 */
 	async handleWorktreeCommand(

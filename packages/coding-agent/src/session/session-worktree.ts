@@ -1,7 +1,9 @@
 /**
- * `/wt` backing: fork the current checkout into a fresh linked git worktree on
- * a new branch, carrying the uncommitted changes along, so the session can be
- * relocated there without disturbing the original checkout.
+ * `/wt` backing: move the session into the branch's linked git worktree. A
+ * branch already checked out elsewhere is reused as-is; otherwise a fresh
+ * worktree is created on the branch (new, or existing at its own tip), carrying
+ * the uncommitted changes along when it starts at the source `HEAD`, so the
+ * session can be relocated there without disturbing the original checkout.
  *
  * The worktree is created through the clone-first path (`worktree.clone`,
  * `isolation.backend`) and lands under the agent-managed worktree base
@@ -23,7 +25,7 @@ import { cfgIsolationBackend, cfgWorktreeCleanSource, cfgWorktreeClone } from ".
 export interface SessionWorktree {
 	/** Absolute, realpath'd worktree root. */
 	path: string;
-	/** Branch checked out in the worktree (created from the source `HEAD`). */
+	/** Branch checked out in the worktree. */
 	branch: string;
 	/** Backend that cloned the checkout, or undefined for a plain checkout. */
 	clonedWith?: IsoBackendKind;
@@ -31,10 +33,14 @@ export interface SessionWorktree {
 	cloneError?: string;
 	/** Checkout the worktree was forked from. */
 	sourceCwd: string;
-	/** Source `HEAD` the worktree branch was created at. */
+	/** Branch tip the worktree started at (the source `HEAD` for a new branch). */
 	baseCommit: string;
 	/** Whether uncommitted source changes were carried into the worktree. */
 	keptChanges: boolean;
+	/** The branch already had this worktree; the session moved in but does not own it. */
+	reused: boolean;
+	/** The branch was created for this worktree, so removing the worktree may delete it. */
+	createdBranch: boolean;
 }
 
 /** State of a session-owned worktree at exit. */
@@ -75,13 +81,16 @@ export function defaultSessionWorktreeBranch(now = new Date()): string {
 
 /** One-line confirmation shown after the session moved into `worktree`. */
 export function formatSessionWorktreeSummary(worktree: SessionWorktree, sourceCleaned = false): string {
+	if (worktree.reused) return `Moved to existing worktree ${worktree.path} on branch ${worktree.branch}.`;
 	const how =
 		worktree.clonedWith === undefined ? "checked out" : `cloned via ${formatIsolationBackend(worktree.clonedWith)}`;
-	const changeStatus = !worktree.keptChanges
-		? "started from clean HEAD"
-		: sourceCleaned
+	const changeStatus = worktree.keptChanges
+		? sourceCleaned
 			? "uncommitted changes moved, source checkout cleaned"
-			: "uncommitted changes carried over";
+			: "uncommitted changes carried over"
+		: worktree.createdBranch
+			? "started from clean HEAD"
+			: "started from the existing branch tip";
 	return `Moved to worktree ${worktree.path} on branch ${worktree.branch} (${how}, ${changeStatus}).`;
 }
 
@@ -110,8 +119,11 @@ export async function cleanSourceCheckoutIfConfigured(
 	}
 }
 /**
- * Create the worktree for `/wt`. Throws with a user-facing message when `cwd`
- * is not a git checkout, `branch` already exists, or git refuses.
+ * Resolve the worktree for `/wt`: reuse the one `branch` is already checked
+ * out in, or create one on `branch` (created from the source `HEAD` when
+ * missing). Changes are carried only when the worktree starts at the source
+ * `HEAD`. Throws with a user-facing message when `cwd` is not a git checkout,
+ * the session is already on `branch`, or git refuses.
  */
 export async function createSessionWorktree(
 	cwd: string,
@@ -133,25 +145,43 @@ export async function createSessionWorktree(
 		throw new Error(`Invalid branch name: ${branch}`);
 	}
 	const branchRef = `refs/heads/${branch}`;
-	if (await repository.refExists(branchRef)) {
-		throw new Error(`Branch '${branch}' already exists; pick another name.`);
+	const worktrees = await repository.worktrees();
+	const branchTip = await repository.resolveRef(branchRef);
+	const existing = branchTip ? worktrees.find(entry => entry.branch === branchRef) : undefined;
+	if (existing && branchTip) {
+		const existingPath = await fs.realpath(existing.path);
+		if (existingPath === (await fs.realpath(repository.info().repoRoot))) {
+			throw new Error(`This session is already on branch '${branch}' in ${existingPath}.`);
+		}
+		return {
+			path: existingPath,
+			branch,
+			sourceCwd: cwd,
+			baseCommit: branchTip,
+			keptChanges: false,
+			reused: true,
+			createdBranch: false,
+		};
 	}
-	const baseCommit = await repository.headSha();
-	if (!baseCommit) {
+	const headCommit = await repository.headSha();
+	if (!headCommit) {
 		throw new Error(`Cannot create a worktree: ${cwd} has no commits.`);
 	}
+	const baseCommit = branchTip ?? headCommit;
+	// Uncommitted changes apply to the source `HEAD`; an existing branch elsewhere starts clean.
+	const carryChanges = keepChanges && baseCommit === headCommit;
 	const primaryRoot = repository.primaryRoot() ?? repository.info().repoRoot;
 	const slug = branch.replaceAll(/[^A-Za-z0-9._-]+/g, "-");
 	const basePath = getWorktreeDir(`${slug}-${hashPath(primaryRoot)}`);
-	const worktreePath = await resolveAvailableWorktreePath(basePath, await repository.worktrees());
+	const worktreePath = await resolveAvailableWorktreePath(basePath, worktrees);
 	await fs.mkdir(path.dirname(worktreePath), { recursive: true });
 
-	await repository.createBranch(branch, baseCommit, false);
+	if (!branchTip) await repository.createBranch(branch, baseCommit, false);
 	const result = await repository.worktreeAdd(worktreePath, branch, {
 		detach: false,
 		clone: cfgWorktreeClone.get(settings),
 		backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
-		keepChanges,
+		keepChanges: carryChanges,
 	});
 	return {
 		path: await fs.realpath(worktreePath),
@@ -160,7 +190,9 @@ export async function createSessionWorktree(
 		cloneError: result.cloneError ?? undefined,
 		sourceCwd: cwd,
 		baseCommit,
-		keptChanges: keepChanges,
+		keptChanges: carryChanges,
+		reused: false,
+		createdBranch: !branchTip,
 	};
 }
 
@@ -302,15 +334,16 @@ export async function removeExitWorktrees(plan: readonly WorktreeExitPlan[]): Pr
 }
 
 /**
- * Force-remove `wt`; also delete its branch unless it `moved` (has new commits).
- * Throws a user-facing error when git refuses either step.
+ * Force-remove `wt`; also delete its branch when `/wt` created it and it has
+ * not `moved` (has no new commits). Throws a user-facing error when git refuses
+ * either step.
  */
 export async function removeSessionWorktree(wt: SessionWorktree, moved: boolean): Promise<void> {
 	const repository = vcs.requireGit(wt.sourceCwd);
 	if (!(await repository.worktreeRemove(wt.path, true))) {
 		throw new Error(`Failed to remove worktree ${wt.path}; branch '${wt.branch}' kept.`);
 	}
-	if (!moved && !(await repository.deleteBranch(wt.branch, true))) {
+	if (wt.createdBranch && !moved && !(await repository.deleteBranch(wt.branch, true))) {
 		throw new Error(`Removed worktree ${wt.path} but failed to delete branch '${wt.branch}'.`);
 	}
 }

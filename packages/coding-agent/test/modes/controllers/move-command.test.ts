@@ -79,7 +79,15 @@ describe("CommandController /move", () => {
 			const target = path.join(sourceDir, "checkout");
 			vi.spyOn(sessionWorktree, "createSessionWorktree").mockImplementation(async () => {
 				await fs.mkdir(target);
-				return { path: target, branch: "feature", sourceCwd: sourceDir, baseCommit: "0", keptChanges: true };
+				return {
+					path: target,
+					branch: "feature",
+					sourceCwd: sourceDir,
+					baseCommit: "0",
+					keptChanges: true,
+					reused: false,
+					createdBranch: true,
+				};
 			});
 			ctx.withBtwSessionMove = vi.fn(async () => false);
 			await new CommandController(ctx).handleWorktreeCommand("feature");
@@ -123,7 +131,15 @@ describe("CommandController /move", () => {
 				creating.resolve();
 				await created.promise;
 				await fs.mkdir(target);
-				return { path: target, branch: "feature", sourceCwd: sourceDir, baseCommit: "0", keptChanges: true };
+				return {
+					path: target,
+					branch: "feature",
+					sourceCwd: sourceDir,
+					baseCommit: "0",
+					keptChanges: true,
+					reused: false,
+					createdBranch: true,
+				};
 			});
 			ctx.session.moveSession = async cwd => {
 				expect(held).toBe(true);

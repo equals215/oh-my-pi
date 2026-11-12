@@ -9279,7 +9279,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	async handleWorktreeCommand(branch?: string, options?: { keepChanges?: boolean }): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
 		const worktree = await this.#commandController.handleWorktreeCommand(branch, options);
-		if (worktree) this.#ownedWorktrees.push(worktree);
+		// A reused worktree belongs to whoever created it; exit cleanup must not touch it.
+		if (worktree && !worktree.reused) this.#ownedWorktrees.push(worktree);
 	}
 
 	/**

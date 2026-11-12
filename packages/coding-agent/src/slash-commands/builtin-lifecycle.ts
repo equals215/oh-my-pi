@@ -788,8 +788,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		name: "wt",
 		aliases: ["worktree"],
 		icon: "folderMove",
-		description: "Move this session into a new worktree, changes included",
-		acpDescription: "Move this session into a new worktree, changes included",
+		description: "Move this session into a branch's worktree, new or existing",
+		acpDescription: "Move this session into a branch's worktree, new or existing",
 		inlineHint: "[<branch>]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
@@ -804,7 +804,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			}
 			const failure = await relocateHeadlessSession(runtime, worktree.path);
 			if (failure) return failure;
-			const cleanup = await cleanSourceCheckoutIfConfigured(sourceCwd, runtime.settings);
+			const cleanup = worktree.keptChanges
+				? await cleanSourceCheckoutIfConfigured(sourceCwd, runtime.settings)
+				: { cleaned: false, errorMessage: undefined };
 			if (cleanup.errorMessage !== undefined) {
 				await runtime.output(
 					`Warning: Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`,
